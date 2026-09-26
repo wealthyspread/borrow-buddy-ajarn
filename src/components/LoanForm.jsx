@@ -10,7 +10,7 @@ export default function LoanForm({ today, editingLoan, onSave, onCancelEdit }) {
   const [dueDate, setDueDate] = useState(editingLoan?.dueDate ?? '')
   const [errors, setErrors] = useState([])
 
-  const handleSubmit = (e) => {
+  const handleSubmit = async (e) => {
     e.preventDefault()
     const draft = {
       ...(editingLoan ?? { returnedDate: null }),
@@ -23,8 +23,9 @@ export default function LoanForm({ today, editingLoan, onSave, onCancelEdit }) {
     setErrors(found)
     if (found.length > 0) return
 
-    onSave(draft)
-    if (!editingLoan) {
+    // onSave คืน false เมื่อบันทึกไม่สำเร็จ ให้คงข้อมูลในฟอร์มไว้
+    const ok = await onSave(draft)
+    if (ok !== false && !editingLoan) {
       setFriendName('')
       setItemName('')
       setBorrowedDate(today)

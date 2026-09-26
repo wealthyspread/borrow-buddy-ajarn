@@ -1,76 +1,95 @@
-import { useLayoutEffect, useState } from 'react'
+import { useEffect, useLayoutEffect, useState } from 'react'
 import './App.css'
 import LoanForm from './components/LoanForm.jsx'
 import LoanList from './components/LoanList.jsx'
+import LoginForm from './components/LoginForm.jsx'
 import SearchBox from './components/SearchBox.jsx'
 import ThemeToggle from './components/ThemeToggle.jsx'
+import { getSession, onSessionChange, signOut } from './lib/authService.js'
 import { toIsoDate } from './lib/dateFormat.js'
+import { markImported, readLegacyLoans } from './lib/legacyImport.js'
 import { filterLoansByFriend, markReturned, unmarkReturned } from './lib/loanRules.js'
-import { loadLoans, saveLoans } from './lib/storage.js'
+import { addLoan, addLoans, listLoans, updateLoan } from './lib/loanRepo.js'
 import { getInitialTheme, saveTheme, toggleTheme } from './lib/theme.js'
 
-const createId = () =>
-  globalThis.crypto?.randomUUID?.() ??
-  `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`
-
-function App() {
-  // โหลดครั้งเดียวตอนเปิดหน้า (อ่านอย่างเดียว ไม่เขียนทับข้อมูลเดิม)
-  const [initial] = useState(loadLoans)
-  const [loans, setLoans] = useState(initial.loans)
-  const [warning, setWarning] = useState(initial.warning)
+function LoanApp({ session, theme, onToggleTheme }) {
+  const [loans, setLoans] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [warning, setWarning] = useState(null)
+  const [legacy, setLegacy] = useState(() => readLegacyLoans())
   const [editingId, setEditingId] = useState(null)
   const [query, setQuery] = useState('')
-  const [theme, setTheme] = useState(() =>
-    getInitialTheme(undefined, window.matchMedia('(prefers-color-scheme: dark)').matches),
-  )
 
-  // ตั้งธีมให้ <html> ก่อนวาดหน้าจอ เพื่อไม่ให้จอกะพริบ
-  useLayoutEffect(() => {
-    document.documentElement.dataset.theme = theme
-  }, [theme])
-
-  const handleToggleTheme = () => {
-    const next = toggleTheme(theme)
-    setTheme(next)
-    saveTheme(next)
-  }
+  useEffect(() => {
+    let cancelled = false
+    listLoans().then(({ data, error }) => {
+      if (cancelled) return
+      setLoans(data)
+      setWarning(error)
+      setLoading(false)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   const today = toIsoDate(new Date())
   const editingLoan = loans.find((loan) => loan.id === editingId) ?? null
   const visibleLoans = filterLoansByFriend(loans, query)
 
-  // ทุกการเปลี่ยน Loan ต้องผ่านฟังก์ชันนี้ เพื่อบันทึกทุกครั้งที่เปลี่ยน
-  // ไม่ใช้ useEffect เพราะจะเขียนรายการว่างทับข้อมูลเดิมที่อ่านไม่ได้ตอนเปิดหน้า
-  const changeLoans = (nextLoans) => {
-    setLoans(nextLoans)
-    setWarning(saveLoans(nextLoans))
-  }
-
-  // Loan ที่ยังไม่มี id คือเพิ่มใหม่ ถ้ามี id คือแก้ไขรายการเดิม
-  const handleSave = (loan) => {
-    if (loan.id) {
-      changeLoans(loans.map((l) => (l.id === loan.id ? loan : l)))
-    } else {
-      changeLoans([...loans, { ...loan, id: createId() }])
-    }
+  // อัปเดตหน้าจอตามผลจริงจากฐานข้อมูลเท่านั้น ถ้าไม่สำเร็จคงข้อมูลเดิมและแจ้งเตือน
+  const handleSave = async (loan) => {
+    const { data, error } = loan.id ? await updateLoan(loan) : await addLoan(loan)
+    setWarning(error)
+    if (error) return false
+    setLoans((prev) => (loan.id ? prev.map((l) => (l.id === data.id ? data : l)) : [...prev, data]))
     setEditingId(null)
+    return true
   }
-
-  const replaceLoan = (target, update) =>
-    changeLoans(loans.map((l) => (l.id === target.id ? update(l) : l)))
 
   const handleMarkReturned = (loan, returnedDate) =>
-    replaceLoan(loan, (l) => markReturned(l, today, returnedDate))
+    handleSave(markReturned(loan, today, returnedDate))
 
-  const handleUnmarkReturned = (loan) => replaceLoan(loan, unmarkReturned)
+  const handleUnmarkReturned = (loan) => handleSave(unmarkReturned(loan))
+
+  const handleImport = async () => {
+    const { error } = await addLoans(legacy.loans)
+    setWarning(error)
+    if (error) return
+    markImported()
+    setLegacy({ loans: [], warning: null })
+    const result = await listLoans()
+    setLoans(result.data)
+    setWarning(result.error)
+  }
+
+  const handleSkipImport = () => setLegacy({ loans: [], warning: null })
 
   return (
-    <main>
+    <>
       <header className="app-header">
         <h1>Borrow Buddy</h1>
-        <ThemeToggle theme={theme} onToggle={handleToggleTheme} />
+        <span>{session.user.email}</span>
+        <button type="button" onClick={signOut}>
+          ออกจากระบบ
+        </button>
+        <ThemeToggle theme={theme} onToggle={onToggleTheme} />
       </header>
       {warning && <p role="alert">{warning}</p>}
+      {legacy.warning && <p role="alert">{legacy.warning}</p>}
+      {legacy.loans.length > 0 && (
+        <section role="status">
+          <p>พบข้อมูลการยืมเดิมในเครื่องนี้ {legacy.loans.length} รายการ ต้องการนำเข้าไปเก็บในบัญชีนี้หรือไม่</p>
+          <div className="form-actions">
+            <button type="button" onClick={handleImport}>
+              นำเข้า
+            </button>
+            <button type="button" onClick={handleSkipImport}>
+              ไม่นำเข้าตอนนี้
+            </button>
+          </div>
+        </section>
+      )}
       <LoanForm
         key={editingLoan?.id ?? 'new'}
         today={today}
@@ -79,13 +98,58 @@ function App() {
         onCancelEdit={() => setEditingId(null)}
       />
       <SearchBox value={query} onChange={setQuery} />
-      <LoanList
-        loans={visibleLoans}
-        today={today}
-        onMarkReturned={handleMarkReturned}
-        onUnmarkReturned={handleUnmarkReturned}
-        onEdit={(loan) => setEditingId(loan.id)}
-      />
+      {loading ? (
+        <p>กำลังโหลด...</p>
+      ) : (
+        <LoanList
+          loans={visibleLoans}
+          today={today}
+          onMarkReturned={handleMarkReturned}
+          onUnmarkReturned={handleUnmarkReturned}
+          onEdit={(loan) => setEditingId(loan.id)}
+        />
+      )}
+    </>
+  )
+}
+
+function App() {
+  // undefined = ยังตรวจเซสชันอยู่, null = ยังไม่ล็อกอิน
+  const [session, setSession] = useState(undefined)
+  const [theme, setTheme] = useState(() =>
+    getInitialTheme(undefined, window.matchMedia('(prefers-color-scheme: dark)').matches),
+  )
+
+  useLayoutEffect(() => {
+    document.documentElement.dataset.theme = theme
+  }, [theme])
+
+  useEffect(() => {
+    getSession().then(setSession)
+    return onSessionChange(setSession)
+  }, [])
+
+  const handleToggleTheme = () => {
+    const next = toggleTheme(theme)
+    setTheme(next)
+    saveTheme(next)
+  }
+
+  if (session === undefined) return <main><p>กำลังโหลด...</p></main>
+
+  return (
+    <main>
+      {session ? (
+        <LoanApp key={session.user.id} session={session} theme={theme} onToggleTheme={handleToggleTheme} />
+      ) : (
+        <>
+          <header className="app-header">
+            <h1>Borrow Buddy</h1>
+            <ThemeToggle theme={theme} onToggle={handleToggleTheme} />
+          </header>
+          <LoginForm />
+        </>
+      )}
     </main>
   )
 }
